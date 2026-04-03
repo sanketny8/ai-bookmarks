@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Reads Chrome bookmarks from the "AI" folder and generates a plain HTML page.
+Handles nested subfolders and shows table of contents.
 
 Usage:
     python sync_bookmarks.py              # generate index.html
@@ -12,7 +13,6 @@ import os
 import subprocess
 import sys
 from datetime import datetime
-from pathlib import Path
 
 CHROME_BOOKMARKS = os.path.expanduser(
     "~/Library/Application Support/Google/Chrome/Default/Bookmarks"
@@ -33,64 +33,99 @@ def find_folder(node, name):
     return None
 
 
-def collect_links(node):
-    """Collect all links and subfolders from a bookmark folder node."""
-    links = []
-    subfolders = []
+def esc(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def slug(name):
+    return name.lower().replace(" ", "-").replace("&", "and").replace("/", "-")
+
+
+def collect_structure(node):
+    """Collect full folder structure: top-level links + subfolders with links."""
+    top_links = []
+    folders = []
     for child in node.get("children", []):
         if child["type"] == "url":
-            links.append({"name": child["name"], "url": child["url"]})
-        elif child["type"] == "folder" and child["name"] != "New folder":
-            sub_links = []
-            for sub_child in child.get("children", []):
-                if sub_child["type"] == "url":
-                    sub_links.append({"name": sub_child["name"], "url": sub_child["url"]})
-            if sub_links:
-                subfolders.append({"name": child["name"], "links": sub_links})
-    return links, subfolders
+            top_links.append({"name": child["name"], "url": child["url"]})
+        elif child["type"] == "folder":
+            links = [
+                {"name": c["name"], "url": c["url"]}
+                for c in child.get("children", [])
+                if c["type"] == "url"
+            ]
+            folders.append({
+                "name": child["name"],
+                "links": links,
+            })
+    return top_links, folders
 
 
-def generate_html(links, subfolders, timestamp):
+def generate_html(top_links, folders, timestamp):
     """Generate a plain HTML page, no CSS, old-school style."""
+    total = len(top_links) + sum(len(f["links"]) for f in folders)
+    non_empty = [f for f in folders if f["links"]]
+    empty = [f for f in folders if not f["links"]]
+
     lines = [
         "<!DOCTYPE html>",
         "<html>",
         "<head>",
-        "<meta charset=\"utf-8\">",
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
         "<title>AI Bookmarks</title>",
         "</head>",
         "<body>",
         "<h1>AI Bookmarks</h1>",
-        f"<p>Last updated: {timestamp}</p>",
+        f"<p>Last updated: {timestamp} | {total} links | {len(folders)} categories</p>",
         "<hr>",
+        "",
+        "<!-- Table of Contents -->",
+        "<h2>Categories</h2>",
+        "<ul>",
     ]
 
-    # Main AI folder links
-    if links:
-        lines.append("<h2>AI</h2>")
-        lines.append("<ul>")
-        for link in links:
-            name = link["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            url = link["url"].replace("&", "&amp;")
-            lines.append(f'  <li><a href="{url}">{name}</a></li>')
-        lines.append("</ul>")
+    for folder in non_empty:
+        name = esc(folder["name"])
+        anchor = slug(folder["name"])
+        lines.append(f'  <li><a href="#{anchor}">{name}</a> ({len(folder["links"])})</li>')
 
-    # Subfolders
-    for folder in subfolders:
-        folder_name = folder["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        lines.append(f"<h2>{folder_name}</h2>")
+    if top_links:
+        lines.append(f'  <li><a href="#uncategorized">Uncategorized</a> ({len(top_links)})</li>')
+
+    if empty:
+        lines.append(f"  <li><i>{len(empty)} empty categories ready for future bookmarks</i></li>")
+
+    lines.append("</ul>")
+    lines.append("<hr>")
+
+    # Subfolders with links
+    for folder in non_empty:
+        name = esc(folder["name"])
+        anchor = slug(folder["name"])
+        lines.append(f'<h2 id="{anchor}">{name} ({len(folder["links"])})</h2>')
         lines.append("<ul>")
         for link in folder["links"]:
-            name = link["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            url = link["url"].replace("&", "&amp;")
-            lines.append(f'  <li><a href="{url}">{name}</a></li>')
+            lname = esc(link["name"])
+            url = esc(link["url"])
+            lines.append(f'  <li><a href="{url}">{lname}</a></li>')
+        lines.append("</ul>")
+        lines.append('<p><a href="#top">[back to top]</a></p>')
+
+    # Top-level uncategorized links
+    if top_links:
+        lines.append('<h2 id="uncategorized">Uncategorized</h2>')
+        lines.append("<ul>")
+        for link in top_links:
+            lname = esc(link["name"])
+            url = esc(link["url"])
+            lines.append(f'  <li><a href="{url}">{lname}</a></li>')
         lines.append("</ul>")
 
-    total = len(links) + sum(len(f["links"]) for f in subfolders)
     lines.extend([
         "<hr>",
-        f"<p><i>{total} links</i></p>",
+        f"<p><i>{total} links across {len(non_empty)} categories</i></p>",
+        '<p><a href="https://github.com/sanketny8/ai-bookmarks">source</a></p>',
         "</body>",
         "</html>",
     ])
@@ -104,7 +139,6 @@ def git_push(repo_dir):
         subprocess.run(cmd, cwd=repo_dir, check=True)
 
     run(["git", "add", "index.html"])
-    # Check if there are changes to commit
     result = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
         cwd=repo_dir
@@ -125,7 +159,6 @@ def main():
     with open(CHROME_BOOKMARKS) as f:
         data = json.load(f)
 
-    # Search all roots for the target folder
     target = None
     for root in data["roots"].values():
         if isinstance(root, dict):
@@ -137,15 +170,15 @@ def main():
         print(f"Folder '{TARGET_FOLDER}' not found in bookmarks.")
         sys.exit(1)
 
-    links, subfolders = collect_links(target)
+    top_links, folders = collect_structure(target)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    html = generate_html(links, subfolders, timestamp)
+    html = generate_html(top_links, folders, timestamp)
 
     with open(OUTPUT_FILE, "w") as f:
         f.write(html)
 
-    total = len(links) + sum(len(f["links"]) for f in subfolders)
-    print(f"Generated {OUTPUT_FILE} ({total} links)")
+    total = len(top_links) + sum(len(f["links"]) for f in folders)
+    print(f"Generated {OUTPUT_FILE} ({total} links, {len(folders)} categories)")
 
     if "--push" in sys.argv:
         git_push(os.path.dirname(os.path.abspath(__file__)))
